@@ -1,0 +1,16 @@
+bottle neck ảnh trả về
+pretrain trc
+ảnh xuất ra cv2 bị bể 640x480, 1024x768, 1280x720
+tìm hiểu code của carla
+async 60fps, sử dụng lidar ko, lưu thành file trc khi process
+process raw nhanh hơn chuyển thành ảnh
+345 346 347 348  349 350 351 352
+346 347
+có transfer model tiếp lên các bước sau không
+sử dụng input gì
+sử dụng model vision gì
+những cách để giảm bottleneck. thử các cách flag khác nhau. hiệu quả nhất là event
+random action từ từ ko nhảy vọt
+normalize reward
+reward engineering
+shared cnn layers
