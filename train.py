@@ -104,6 +104,7 @@ if __name__ == "__main__":
         model = TD3(
             CnnPolicy,
             carla_env,
+            learning_rate=0.00001,
             buffer_size=20000,
             learning_starts=1000,
             batch_size=64,
@@ -121,5 +122,5 @@ if __name__ == "__main__":
 
         # Train the model
         model.learn(
-            total_timesteps=100000, callback=checkpoint_callback, progress_bar=True
+            total_timesteps=100000, callback=checkpoint_callback, log_interval=1, progress_bar=True
         )
