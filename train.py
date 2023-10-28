@@ -5,7 +5,11 @@ import gymnasium as gym
 from stable_baselines3 import TD3
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.env_checker import check_env
-from stable_baselines3.td3.policies import CnnPolicy
+from stable_baselines3.common.noise import (
+    NormalActionNoise,
+    OrnsteinUhlenbeckActionNoise,
+)
+from stable_baselines3.td3.policies import CnnPolicy, MlpPolicy
 
 from env import CarlaEnvContinuous
 
@@ -100,16 +104,31 @@ if __name__ == "__main__":
         # # Check compatibility
         # check_env(carla_env, warn=True)
 
+        mean = [0, 0]  # mean values for throttle/brake and steer
+        sigma = [0.1, 0.05]  # standard deviations for throttle/brake and steer
+        normal_action_noise = NormalActionNoise(mean=mean, sigma=sigma)
+
+        theta = 0.15
+        sigma_ou = 0.2
+        orn_action_noise = OrnsteinUhlenbeckActionNoise(
+            mean=mean, sigma=sigma_ou, theta=theta
+        )
+
+        # Register the custom network
+        policy_kwargs = dict(net_arch=dict(qf=[512, 256, 128], pi=[512, 256, 128]))
+
         # Define the TD3 model
         model = TD3(
-            CnnPolicy,
+            MlpPolicy,
             carla_env,
-            learning_rate=0.00001,
-            buffer_size=20000,
+            learning_rate=0.000000001,
+            # buffer_size=1000000,
             learning_starts=1000,
-            batch_size=64,
-            optimize_memory_usage=True,
-            verbose=2,
+            batch_size=512,
+            # action_noise=normal_action_noise,
+            optimize_memory_usage=False,
+            policy_kwargs=policy_kwargs,
+            verbose=1,
             device="cuda",
         )
 
@@ -122,5 +141,8 @@ if __name__ == "__main__":
 
         # Train the model
         model.learn(
-            total_timesteps=100000, callback=checkpoint_callback, log_interval=1, progress_bar=True
+            total_timesteps=1000000,
+            callback=checkpoint_callback,
+            log_interval=1,
+            progress_bar=True,
         )

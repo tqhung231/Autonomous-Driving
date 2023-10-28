@@ -19,13 +19,17 @@ image shape 1 H W
 
 lỗi env carla liên tục crash
 đồng bộ hàm callback trả về image với hàm chính và tránh blocking để giảm bottleneck
+
 action là [throttle, steer], nếu throttle > 0 thì chạy, throttle < 0 thì thắng lại
+reward = float(action[0] - abs(action[1])) để khuyến khích xe đi tới và phạt khi xe quẹo quá nhiều
 spawn 20 npc trên đường
+
 thử image, lidar và radar
 image thì fixed shape nhưng cnn nặng, có thử nghiệm greyscale để giảm độ phức tạp
 lidar và radar thì varried shape do tùy thuộc vào điểm được detect
+dự định tìm hiểu poinet và point cloud convolution
 train bằng image thì model stuck [1,1], có thể do learning rate quá lớn
 chuyển sang radar và process data trả về một vector khoảng cách tới chiếc xe shape (180,2) tượng trưng cho 180 độ phía trước chiếc xe và góc trên góc dưới
+
 dự định custom code của sb3 để custom model architecture
-reward = float(action[0] - abs(action[1])) để khuyến khích xe đi tới và phạt khi xe quẹo quá nhiều
 dự định thêm các reward khác nhưng hiện h cứ để reward đơn giản

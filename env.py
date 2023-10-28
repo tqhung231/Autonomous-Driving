@@ -1,3 +1,4 @@
+import math
 import random
 import threading
 import time
@@ -10,6 +11,10 @@ import pygame
 from gymnasium import spaces
 
 sem = threading.Semaphore(1)
+events = [threading.Event() for _ in range(6)]
+
+SECTIONS = 180
+MAX_DISTANCE = 50  # same as radar range
 
 DELTA_SECONDS = 0.05
 
@@ -52,6 +57,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.collision = None
         self.lane_invasion = None
         self.lidar_data = None
+        self.radar_data_dict = {}
         self.npc = []
 
         # Set actors
@@ -72,17 +78,17 @@ class CarlaEnvContinuous(gymnasium.Env):
             npc = self._spawn_npc()
             self.npc.append(npc)
 
-        # Setup RGB camera
-        camera_bp = self.blueprint_library.find("sensor.camera.rgb")
-        camera_bp.set_attribute("image_size_x", f"{self.img_width}")
-        camera_bp.set_attribute("image_size_y", f"{self.img_height}")
-        camera_bp.set_attribute("fov", "100")
-        camera_transform = carla.Transform(carla.Location(x=1.3, z=2.3))
-        self.camera = self.world.spawn_actor(
-            camera_bp, camera_transform, attach_to=self.ego_vehicle
-        )
-        self.camera.listen(self._process_image)
-        # self.camera = None
+        # # Setup RGB camera
+        # camera_bp = self.blueprint_library.find("sensor.camera.rgb")
+        # camera_bp.set_attribute("image_size_x", f"{self.img_width}")
+        # camera_bp.set_attribute("image_size_y", f"{self.img_height}")
+        # camera_bp.set_attribute("fov", "100")
+        # camera_transform = carla.Transform(carla.Location(x=1.3, z=2.3))
+        # self.camera = self.world.spawn_actor(
+        #     camera_bp, camera_transform, attach_to=self.ego_vehicle
+        # )
+        # self.camera.listen(self._process_image)
+        self.camera = None
 
         # Setup collision and lane invasion sensors
         collision_bp = self.blueprint_library.find("sensor.other.collision")
@@ -117,6 +123,27 @@ class CarlaEnvContinuous(gymnasium.Env):
         # self.lidar_sensor.listen(self._process_lidar)
         self.lidar_sensor = None
 
+        # Attach radars
+        self.rad_cam = []
+        for i in range(6):
+            rad_bp = self.world.get_blueprint_library().find("sensor.other.radar")
+            rad_bp.set_attribute("horizontal_fov", str(30))
+            rad_bp.set_attribute("vertical_fov", str(20))
+            rad_bp.set_attribute("range", str(50))
+            rad_location = carla.Location(x=2.0, z=1.0)
+            rad_rotation = carla.Rotation(pitch=5, yaw=(-75 + 30 * i))
+            rad_transform = carla.Transform(rad_location, rad_rotation)
+            rad_ego = self.world.spawn_actor(
+                rad_bp,
+                rad_transform,
+                attach_to=self.ego_vehicle,
+                attachment_type=carla.AttachmentType.Rigid,
+            )
+            rad_ego.listen(
+                lambda radar_data, idx=i: self._process_radar(radar_data, idx)
+            )
+            self.rad_cam.append(rad_ego)
+
         # Tick the world
         self.world.tick()
 
@@ -128,6 +155,7 @@ class CarlaEnvContinuous(gymnasium.Env):
             self.lane_invasion_sensor,
             self.lidar_sensor,
         ]
+        self.actors.extend(self.rad_cam)
 
         # If in debug mode, enable autopilot
         if self.debug:
@@ -144,9 +172,10 @@ class CarlaEnvContinuous(gymnasium.Env):
         # )
 
         # Observations are dictionaries with the sensor data
-        self.observation_space = spaces.Box(
-            0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
-        )
+        # self.observation_space = spaces.Box(
+        #     0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
+        # )
+        self.observation_space = spaces.Box(0, 1, shape=(360,), dtype=np.float32)
 
         # Action corresponding to throtle, steer, brake
         self.action_space = spaces.Box(
@@ -155,6 +184,8 @@ class CarlaEnvContinuous(gymnasium.Env):
             shape=(2,),
             dtype=np.float32,
         )
+
+        self._follow_agent()
 
     def reset(self, seed=None):
         # Get the current time
@@ -183,13 +214,14 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.collision = None
         self.lane_invasion = None
         self.lidar_data = None
+        self.radar_data_dict = {}
 
         # Tick the world
         self.world.tick()
 
-        # Wait for image to be captured
-        while self.img_captured is None:
-            pass
+        # # Wait for image to be captured
+        # while self.img_captured is None:
+        #     pass
 
         # # Wait for lidar data
         # while self.lidar_data is None:
@@ -240,9 +272,29 @@ class CarlaEnvContinuous(gymnasium.Env):
         return self._get_obs(), reward, terminated, truncated, {}
 
     def _get_obs(self):
-        with sem:
-            return self.img_captured
-            # return self.lidar_data
+        # with sem:
+        #     return self.img_captured
+        # return self.lidar_data
+        for event in events:
+            event.wait()
+
+        combined_data = np.full((SECTIONS, 2), MAX_DISTANCE)
+
+        for idx, radar_data in self.radar_data_dict.items():
+            for detect in radar_data:
+                azi = math.degrees(detect.azimuth)
+                alt = math.degrees(detect.altitude)
+                section = int((azi + 15) % 30)  # +15 to shift from [-15, 15] to [0, 30]
+                section = section + 30 * idx
+                part_idx = 1 if alt >= 0 else 0  # 1 for up, 0 for down
+                combined_data[section, part_idx] = min(
+                    combined_data[section, part_idx], detect.depth / MAX_DISTANCE
+                )
+
+        for event in events:
+            event.clear()
+
+        return combined_data.flatten()
 
     def _tick(self):
         self.world.tick()
@@ -268,6 +320,10 @@ class CarlaEnvContinuous(gymnasium.Env):
 
             self.lidar_data = self.lidar_data[:, :3]
 
+    def _process_radar(self, data, idx):
+        self.radar_data_dict[idx] = data
+        events[idx].set()
+
     def _on_collision(self, event):
         self.collision = event
 
@@ -286,8 +342,8 @@ class CarlaEnvContinuous(gymnasium.Env):
         car_transform.rotation.pitch = -70
 
         # Set the spectator's transform
-        # spectator.set_transform(car_transform)
-        spectator.set_transform(self.camera.get_transform())
+        spectator.set_transform(car_transform)
+        # spectator.set_transform(self.camera.get_transform())
 
     def _spawn_npc(self):
         # Get a random blueprint.
@@ -609,7 +665,9 @@ if __name__ == "__main__":
         # Get the start time
         start_time = time.time()
         while time.time() - start_time < 100:
-            obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
+            # obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
+            obs, reward, terminated, truncated, _ = env.step([1.0, 1.0])
+            print(reward)
             # print(obs.shape)
             if terminated or truncated:
                 env.reset()
