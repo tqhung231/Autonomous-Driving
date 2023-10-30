@@ -4,7 +4,7 @@ from env import CarlaEnvContinuous
 
 with CarlaEnvContinuous() as carla_env:
     # Load the trained agent
-    model = TD3.load("checkpoints/model.zip", carla_env)
+    model = TD3.load("checkpoints/model5.zip", carla_env)
 
     # If you want to test the learned policy after training:
     obs, _ = carla_env.reset()

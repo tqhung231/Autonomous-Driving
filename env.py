@@ -13,7 +13,8 @@ from gymnasium import spaces
 sem = threading.Semaphore(1)
 events = [threading.Event() for _ in range(6)]
 
-SECTIONS = 180
+SECTIONS = 18
+PART = 2
 MAX_DISTANCE = 50  # same as radar range
 
 DELTA_SECONDS = 0.05
@@ -63,20 +64,136 @@ class CarlaEnvContinuous(gymnasium.Env):
         # Set actors
         self.blueprint_library = self.world.get_blueprint_library()
 
+        self._set_up_env()
+
+        # # Observations are dictionaries with the sensor data
+        # self.observation_space = spaces.Dict(
+        #     {
+        #         "rbg": spaces.Box(
+        #             0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
+        #         ),
+        #     }
+        # )
+
+        # Observations are dictionaries with the sensor data
+        # self.observation_space = spaces.Box(
+        #     0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
+        # )
+        low = np.full(39, 0.0)
+        low[0] = -1.0
+        low[1] = -1.0
+        high = np.full(39, 1.0)
+        high[2] = 2.0
+        self.observation_space = spaces.Box(
+            low=low, high=high, shape=(39,), dtype=np.float32
+        )
+
+        # Action corresponding to throtle, steer, brake
+        self.action_space = spaces.Box(
+            low=np.array([-1.0, -1.0]),
+            high=np.array([1.0, 1.0]),
+            shape=(2,),
+            dtype=np.float32,
+        )
+
+    def reset(self, seed=None):
+        # # Get the current time
+        # now = datetime.now()
+        # with open("log.txt", "a") as file:
+        #     file.write(f"Reset environment at {now.hour}:{now.minute}\n")
+        # We need the following line to seed self.np_random
+        super().reset(seed=seed)
+
+        self._set_up_env()
+
+        # Reset the data
+        self.frame = 0
+        self.images = []
+        self.img_captured = None
+        self.collision = None
+        self.lane_invasion = None
+        self.lidar_data = None
+        self.radar_data_dict = {}
+
+        # # Wait for image to be captured
+        # while self.img_captured is None:
+        #     pass
+
+        # # Wait for lidar data
+        # while self.lidar_data is None:
+        #     pass
+
+        # Get initial observation
+        observation = self._get_obs()
+
+        self._follow_agent()
+
+        return observation, {}
+
+    def step(self, action):
+        print(action)
+        # self._follow_agent()
+        # Set vehicle control
+        if action[0] > 0:
+            control = carla.VehicleControl(
+                throttle=float(action[0]), steer=float(action[1]), brake=0.0
+            )
+        else:
+            control = carla.VehicleControl(
+                throttle=0.0, steer=float(action[1]), brake=float(-action[0])
+            )
+        self.ego_vehicle.apply_control(control)
+
+        # Tick the world
+        self._tick()
+
+        # Calculate the reward
+        terminated = False
+        truncated = False
+
+        obs = self._get_obs()
+
+        if self.collision:
+            terminated = True
+            reward = -100.0
+            self.collision = None
+            print("Collision!")
+            return obs, reward, terminated, truncated, {}
+
+        reward = float(action[0] - abs(action[1]))
+        angle_to_goal = obs[0]
+        reward += 1 - abs(angle_to_goal)
+
+        # if self.lane_invasion:
+        #     print("Lane invasion")
+        #     reward -= 1
+        #     self.lane_invasion = None
+
+        if self.frame >= 1000:
+            truncated = True
+            print("Time out!")
+            return obs, reward, terminated, truncated, {}
+
+        if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
+            terminated = True
+            reward += 100.0
+            print("Goal reached!")
+            return obs, reward, terminated, truncated, {}
+
+        return obs, reward, terminated, truncated, {}
+
+    def _set_up_env(self):
+        self._destroy()
+
         # Set ego vehicle spawn point
         spawn_points = self.world.get_map().get_spawn_points()
-        # chosen_spawn_point = random.choice(spawn_points[345:353])
-        self.chosen_spawn_point = spawn_points[347]
+        chosen_spawn_point = spawn_points.pop(random.randint(0, len(spawn_points) - 1))
+        # self.chosen_spawn_point = spawn_points[347]
 
         # Setup ego vehicle
         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
-        self.ego_vehicle = self.world.spawn_actor(vehicle_bp, self.chosen_spawn_point)
-
-        # Spawn NPC vehicles
-        self.num_npc = num_npc
-        for _ in range(self.num_npc):
-            npc = self._spawn_npc()
-            self.npc.append(npc)
+        vehicle_bp.set_attribute("color", "0,0,0")
+        self.ego_vehicle = self.world.spawn_actor(vehicle_bp, chosen_spawn_point)
 
         # # Setup RGB camera
         # camera_bp = self.blueprint_library.find("sensor.camera.rgb")
@@ -125,13 +242,15 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Attach radars
         self.rad_cam = []
-        for i in range(6):
+        self.rad_num = 6
+        self.rad_section = SECTIONS // self.rad_num
+        for i in range(self.rad_num):
             rad_bp = self.world.get_blueprint_library().find("sensor.other.radar")
             rad_bp.set_attribute("horizontal_fov", str(30))
-            rad_bp.set_attribute("vertical_fov", str(20))
+            rad_bp.set_attribute("vertical_fov", str(30))
             rad_bp.set_attribute("range", str(50))
             rad_location = carla.Location(x=2.0, z=1.0)
-            rad_rotation = carla.Rotation(pitch=5, yaw=(-75 + 30 * i))
+            rad_rotation = carla.Rotation(pitch=0, yaw=(-75 + 30 * i))
             rad_transform = carla.Transform(rad_location, rad_rotation)
             rad_ego = self.world.spawn_actor(
                 rad_bp,
@@ -143,9 +262,6 @@ class CarlaEnvContinuous(gymnasium.Env):
                 lambda radar_data, idx=i: self._process_radar(radar_data, idx)
             )
             self.rad_cam.append(rad_ego)
-
-        # Tick the world
-        self.world.tick()
 
         # Save all actors
         self.actors = [
@@ -162,139 +278,139 @@ class CarlaEnvContinuous(gymnasium.Env):
             if self.ego_vehicle is not None:
                 self.ego_vehicle.set_autopilot(True)
 
-        # # Observations are dictionaries with the sensor data
-        # self.observation_space = spaces.Dict(
-        #     {
-        #         "rbg": spaces.Box(
-        #             0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
-        #         ),
-        #     }
-        # )
-
-        # Observations are dictionaries with the sensor data
-        # self.observation_space = spaces.Box(
-        #     0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
-        # )
-        self.observation_space = spaces.Box(0, 1, shape=(360,), dtype=np.float32)
-
-        # Action corresponding to throtle, steer, brake
-        self.action_space = spaces.Box(
-            low=np.array([-1.0, -1.0]),
-            high=np.array([1.0, 1.0]),
-            shape=(2,),
-            dtype=np.float32,
-        )
-
-        self._follow_agent()
-
-    def reset(self, seed=None):
-        # Get the current time
-        now = datetime.now()
-        with open("log.txt", "a") as file:
-            file.write(f"Reset environment at {now.hour}:{now.minute}\n")
-        # We need the following line to seed self.np_random
-        super().reset(seed=seed)
-
-        # Destroy NPC vehicles
-        for npc in self.npc:
-            npc.destroy()
-        self.npc = []
-
-        self.ego_vehicle.set_transform(self.chosen_spawn_point)
-
-        # Spawn NPC vehicles
-        for _ in range(self.num_npc):
-            npc = self._spawn_npc()
-            self.npc.append(npc)
-
-        # Reset the data
-        self.frame = 0
-        self.images = []
-        self.img_captured = None
-        self.collision = None
-        self.lane_invasion = None
-        self.lidar_data = None
-        self.radar_data_dict = {}
-
         # Tick the world
         self.world.tick()
 
-        # # Wait for image to be captured
-        # while self.img_captured is None:
-        #     pass
+        # Get a list of spawn points and filter for points near the ego vehicle
+        nearby_spawn_points = [
+            sp
+            for sp in spawn_points
+            if sp.location.distance(self.ego_vehicle.get_location()) < 50
+        ]
 
-        # # Wait for lidar data
-        # while self.lidar_data is None:
-        #     pass
+        sampled_spawn_points = random.sample(
+            nearby_spawn_points, len(nearby_spawn_points) // 2
+        )
 
-        # Get initial observation
-        observation = self._get_obs()
+        # Spawn NPC vehicles
+        # self.num_npc = num_npc
+        for sp in sampled_spawn_points:
+            npc = self._spawn_npc(sp)
+            self.npc.append(npc)
 
-        return observation, {}
+        # Setup goal location
+        self.goal_location = self._set_goal()
 
-    def step(self, action):
-        print(action)
-        # self._follow_agent()
-        # Set vehicle control
-        if action[0] > 0:
-            control = carla.VehicleControl(
-                throttle=float(action[0]), steer=float(action[1]), brake=0.0
+    def _set_goal(self):
+        ego_location = self.ego_vehicle.get_location()
+        map = self.world.get_map()
+        initial_waypoint = map.get_waypoint(ego_location)
+
+        distance_to_travel = 110
+        distance_traveled = 0
+        current_waypoint = initial_waypoint
+
+        while distance_traveled < distance_to_travel:
+            # Get the next waypoint along the road
+            next_waypoints = current_waypoint.next(
+                1.0
+            )  # Adjust the distance to the next waypoint as needed
+            if not next_waypoints:
+                # No more waypoints, end the loop
+                break
+            next_waypoint = next_waypoints[0]
+
+            # Update the distance traveled
+            distance_traveled += next_waypoint.transform.location.distance(
+                current_waypoint.transform.location
             )
-        else:
-            control = carla.VehicleControl(
-                throttle=0.0, steer=float(action[1]), brake=float(-action[0])
-            )
-        self.ego_vehicle.apply_control(control)
 
-        # Tick the world
-        self._tick()
+            # Update the current waypoint for the next iteration
+            current_waypoint = next_waypoint
 
-        # Calculate the reward
-        terminated = False
-        truncated = False
+        goal_location = current_waypoint.transform.location
 
-        if self.collision:
-            terminated = True
-            reward = -10.0
-            self.collision = None
-            return self._get_obs(), reward, terminated, truncated, {}
+        # self.world.debug.draw_point(
+        #     goal_location,
+        #     size=0.5,
+        #     life_time=-1,
+        #     persistent_lines=False,
+        #     color=carla.Color(255, 0, 0),
+        # )
 
-        reward = float(action[0] - abs(action[1]))
-        # if self.lane_invasion:
-        #     print("Lane invasion")
-        #     reward -= 1
-        #     self.lane_invasion = None
-
-        if self.frame >= 1000:
-            truncated = True
-            return self._get_obs(), reward, terminated, truncated, {}
-
-        return self._get_obs(), reward, terminated, truncated, {}
+        return goal_location
 
     def _get_obs(self):
+        # Steering Angle
+        steering_angle = self.ego_vehicle.get_control().steer  # [-1, 1]
+
+        # Speed
+        ego_velocity = self.ego_vehicle.get_velocity()
+        ego_speed = 3.6 * math.sqrt(
+            ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2
+        )  # speed in km/h
+        ego_speed = ego_speed / 100  # normalize to [0, 1]
+
+        # Angle to the Goal
+        ego_location = self.ego_vehicle.get_location()
+        ego_orientation = self.ego_vehicle.get_transform().rotation.yaw  # in degrees
+        # print(f"Ego orientation: {ego_orientation}")
+
+        # Calculate the direction to the goal in degrees
+        direction_to_goal_deg = math.degrees(
+            math.atan2(
+                self.goal_location.y - ego_location.y,
+                self.goal_location.x - ego_location.x,
+            )
+        )
+        # print(f"Direction to goal: {direction_to_goal_deg}")
+        # Compute the angle difference
+        angle_to_goal = direction_to_goal_deg - ego_orientation
+        # Normalize the angle difference to the range [-180, 180]
+        angle_to_goal = (angle_to_goal + 180) % 360 - 180
+        # Normalize further to the range [-1, 1]
+        angle_to_goal_normalized = angle_to_goal / 180.0
+        # print(f"Angle to goal: {angle_to_goal_normalized}")
+
         # with sem:
         #     return self.img_captured
         # return self.lidar_data
         for event in events:
             event.wait()
 
-        combined_data = np.full((SECTIONS, 2), MAX_DISTANCE)
+        combined_data = np.full((SECTIONS, PART), MAX_DISTANCE)
+        all_points = []
 
         for idx, radar_data in self.radar_data_dict.items():
+            points = []
             for detect in radar_data:
                 azi = math.degrees(detect.azimuth)
                 alt = math.degrees(detect.altitude)
-                section = int((azi + 15) % 30)  # +15 to shift from [-15, 15] to [0, 30]
-                section = section + 30 * idx
-                part_idx = 1 if alt >= 0 else 0  # 1 for up, 0 for down
-                combined_data[section, part_idx] = min(
-                    combined_data[section, part_idx], detect.depth / MAX_DISTANCE
-                )
+                section = int(
+                    (azi + 15) % self.rad_section
+                )  # +15 to shift from [-15, 15] to [0, 30]
+                section = section + self.rad_section * idx
+                # part_idx = 1 if alt >= 0 else 0  # 1 for up, 0 for down
+                part_idx = int(PART * ((alt + 15) / 30))
+                distance = detect.depth / MAX_DISTANCE
+                if distance < combined_data[section, part_idx]:
+                    combined_data[section, part_idx] = distance
+                    points.append(detect)
+            all_points.append((radar_data.transform, points))
+        combined_data = combined_data.flatten() / 50
+
+        # self._draw_radar_points(all_points)
 
         for event in events:
             event.clear()
 
-        return combined_data.flatten()
+        return np.concatenate(
+            [
+                [angle_to_goal_normalized, steering_angle, ego_speed],
+                combined_data,
+            ],
+            dtype=np.float32,
+        )
 
     def _tick(self):
         self.world.tick()
@@ -324,6 +440,33 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.radar_data_dict[idx] = data
         events[idx].set()
 
+    def _draw_radar_points(self, all_points):
+        for current_trans, points in all_points:
+            if points:
+                current_rot = current_trans.rotation
+                for point in points:
+                    azi = math.degrees(point.azimuth)
+                    alt = math.degrees(point.altitude)
+                    # The 0.25 adjusts a bit the distance so the dots can
+                    # be properly seen
+                    fw_vec = carla.Vector3D(x=point.depth - 0.25)
+                    carla.Transform(
+                        carla.Location(),
+                        carla.Rotation(
+                            pitch=current_rot.pitch + alt,
+                            yaw=current_rot.yaw + azi,
+                            roll=current_rot.roll,
+                        ),
+                    ).transform(fw_vec)
+
+                    self.world.debug.draw_point(
+                        current_trans.location + fw_vec,
+                        size=0.075,
+                        life_time=0.06,
+                        persistent_lines=False,
+                        color=carla.Color(255, 0, 0),
+                    )
+
     def _on_collision(self, event):
         self.collision = event
 
@@ -345,7 +488,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         spectator.set_transform(car_transform)
         # spectator.set_transform(self.camera.get_transform())
 
-    def _spawn_npc(self):
+    def _spawn_npc(self, spawn_point):
         # Get a random blueprint.
         blueprint = random.choice(
             self.world.get_blueprint_library().filter("vehicle.*")
@@ -360,20 +503,10 @@ class CarlaEnvContinuous(gymnasium.Env):
                 self.world.get_blueprint_library().filter("vehicle.*")
             )
 
-        # Define a random color for the vehicle
-        if blueprint.has_attribute("color"):
-            color = random.choice(blueprint.get_attribute("color").recommended_values)
-            blueprint.set_attribute("color", color)
-
         # Spawn the vehicle
-        vehicle = None
-        while vehicle is None:
-            try:
-                spawn_point = random.choice(self.world.get_map().get_spawn_points())
-                vehicle = self.world.spawn_actor(blueprint, spawn_point)
-            except RuntimeError:
-                pass
-        vehicle.set_autopilot(True)
+        vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
+        if vehicle:
+            vehicle.set_autopilot(True)
 
         return vehicle
 
@@ -388,7 +521,8 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.actors = []
 
         for npc in self.npc:
-            npc.destroy()
+            if npc is not None:
+                npc.destroy()
 
         self.npc = []
 
@@ -410,254 +544,6 @@ class CarlaEnvContinuous(gymnasium.Env):
         self._destroy()
 
 
-# class CarlaEnvDiscrete(gymnasium.Env):
-#     metadata = {"render_modes": ["true", "false"], "render_fps": 20}
-
-#     def __init__(self, debug=False, render_mode=True):
-#         # Connect to the server
-#         self.client = carla.Client("127.0.0.1", 2000)
-#         self.client.set_timeout(30.0)
-#         self.client.load_world("Town04")
-
-#         # Get the world
-#         self.world = self.client.get_world()
-
-#         # Set synchronous mode
-#         settings = self.world.get_settings()
-#         settings.synchronous_mode = True
-#         settings.fixed_delta_seconds = DELTA_SECONDS  # FPS
-#         settings.no_rendering_mode = not render_mode
-#         self.world.apply_settings(settings)
-#         self.fixed_delta_seconds = DELTA_SECONDS
-
-#         # Set debug mode
-#         self.debug = debug
-
-#         # Set image size
-#         self.img_width = 640
-#         self.img_height = 480
-
-#         # Additional information
-#         self.frame = 0
-#         self.actors = []
-#         self.img_captured = None
-#         self.collision = None
-#         self.lane_invasion = None
-
-#         # Set actors
-#         self.blueprint_library = self.world.get_blueprint_library()
-
-#         # Set ego vehicle spawn point
-#         spawn_points = self.world.get_map().get_spawn_points()
-#         # chosen_spawn_point = random.choice(spawn_points[345:353])
-#         self.chosen_spawn_point = spawn_points[347]
-
-#         # Setup ego vehicle
-#         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
-#         self.ego_vehicle = self.world.spawn_actor(vehicle_bp, self.chosen_spawn_point)
-
-#         # Setup RGB camera
-#         camera_bp = self.blueprint_library.find("sensor.camera.rgb")
-#         camera_bp.set_attribute("image_size_x", f"{self.img_width}")
-#         camera_bp.set_attribute("image_size_y", f"{self.img_height}")
-#         camera_bp.set_attribute("fov", "100")
-#         camera_transform = carla.Transform(carla.Location(x=1.3, z=2.3))
-#         self.camera = self.world.spawn_actor(
-#             camera_bp, camera_transform, attach_to=self.ego_vehicle
-#         )
-#         self.camera.listen(self._process_image)
-
-#         # Setup collision and lane invasion sensors
-#         collision_bp = self.blueprint_library.find("sensor.other.collision")
-#         self.collision_sensor = self.world.spawn_actor(
-#             collision_bp, carla.Transform(), attach_to=self.ego_vehicle
-#         )
-#         self.collision_sensor.listen(self._on_collision)
-
-#         lane_invasion_bp = self.blueprint_library.find("sensor.other.lane_invasion")
-#         self.lane_invasion_sensor = self.world.spawn_actor(
-#             lane_invasion_bp, carla.Transform(), attach_to=self.ego_vehicle
-#         )
-#         self.lane_invasion_sensor.listen(self._on_lane_invasion)
-
-#         # # Attach LiDAR sensor to the ego vehicle
-#         # lidar_bp = self.blueprint_library.find('sensor.lidar.ray_cast')
-#         # # lidar_bp.set_attribute('range', '100')  # 100 meters range
-#         # lidar_bp.set_attribute('channels', '32')  # 32 channels
-#         # lidar_bp.set_attribute('rotation_frequency', '10')  # 10 Hz
-#         # lidar_bp.set_attribute('upper_fov', '0')  # Upper field of view
-#         # lidar_bp.set_attribute('lower_fov', '-30')  # Lower field of view
-#         # lidar_bp.set_attribute('points_per_second', '100000')
-#         # lidar_bp.set_attribute('dropoff_general_rate', '0.0')  # No points dropoff
-
-#         # Tick the world
-#         self.world.tick()
-
-#         # Save all actors
-#         self.actors = [
-#             self.ego_vehicle,
-#             self.camera,
-#             self.collision_sensor,
-#             self.lane_invasion_sensor,
-#         ]
-
-#         # If in debug mode, enable autopilot
-#         if self.debug:
-#             if self.ego_vehicle is not None:
-#                 self.ego_vehicle.set_autopilot(True)
-
-#         # # Observations are dictionaries with the sensor data
-#         # self.observation_space = spaces.Dict(
-#         #     {
-#         #         "rbg": spaces.Box(
-#         #             0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
-#         #         ),
-#         #     }
-#         # )
-
-#         # Observations are dictionaries with the sensor data
-#         self.observation_space = spaces.Box(
-#             0, 255, shape=(self.img_height, self.img_width, 3), dtype=np.uint8
-#         )
-
-#         # Action corresponding to throtle, steer, brake
-#         self.action_space = spaces.Box(
-#             low=np.array([0, -1.0, 0]),
-#             high=np.array([1.0, 1.0, 1.0]),
-#             shape=(3,),
-#             dtype=np.float32,
-#         )
-
-#     def _get_obs(self):
-#         with sem:
-#             self.img_cache = self.img_captured
-#             # return {"rbg": img}
-#             return self.img_cache
-
-#     def _tick(self):
-#         self.world.tick()
-#         self.frame += 1
-#         # print(f"Time: {self.frame*self.fixed_delta_seconds}s")
-
-#     def _process_image(self, image):
-#         with sem:
-#             self.img_captured = np.array(image.raw_data, dtype=np.dtype("uint8"))
-#             self.img_captured = np.reshape(
-#                 self.img_captured, (self.img_height, self.img_width, 4)
-#             )
-#             self.img_captured = self.img_captured[:, :, :3]
-#             self.img_captured = self.img_captured[:, :, ::-1]
-
-#     def _on_collision(self, event):
-#         self.collision = event
-
-#     def _on_lane_invasion(self, event):
-#         self.lane_invasion = event
-
-#     def _follow_agent(self):
-#         # Get the spectator from the world
-#         spectator = self.world.get_spectator()
-
-#         # Get the car's current transform
-#         car_transform = self.ego_vehicle.get_transform()
-
-#         # Modify the transform to move the spectator
-#         car_transform.location.z = 50
-#         car_transform.rotation.pitch = -70
-
-#         # Set the spectator's transform
-#         # spectator.set_transform(car_transform)
-#         spectator.set_transform(self.camera.get_transform())
-
-#     def reset(self, seed=None):
-#         # Get the current time
-#         now = datetime.now()
-#         with open("log.txt", "a") as file:
-#             file.write(f"Reset environment at {now.hour}:{now.minute}\n")
-#         # We need the following line to seed self.np_random
-#         super().reset(seed=seed)
-
-#         self.ego_vehicle.set_transform(self.chosen_spawn_point)
-
-#         # Reset the data
-#         self.frame = 0
-#         self.images = []
-#         self.img_captured = None
-#         self.collision = None
-#         self.lane_invasion = None
-
-#         # Tick the world
-#         self.world.tick()
-
-#         # Wait for image to be captured
-#         while self.img_captured is None:
-#             pass
-
-#         # Get initial observation
-#         observation = self._get_obs()
-
-#         return observation, {}
-
-#     def step(self, action):
-#         print(action)
-#         self._follow_agent()
-#         # Set vehicle control
-#         control = carla.VehicleControl(
-#             throttle=float(action[0]), steer=float(action[1]), brake=float(action[2])
-#         )
-#         self.ego_vehicle.apply_control(control)
-
-#         # Tick the world
-#         self._tick()
-
-#         # Calculate the reward
-#         terminated = False
-#         truncated = False
-
-#         if self.collision:
-#             terminated = True
-#             reward = -10.0
-#             self.collision = None
-#             return self._get_obs(), reward, terminated, truncated, {}
-
-#         reward = float(action[0] - abs(action[1]) - action[2])
-#         if self.lane_invasion:
-#             reward -= 1
-#             self.lane_invasion = None
-
-#         if self.frame >= 1000:
-#             truncated = True
-#             return self._get_obs(), reward, terminated, truncated, {}
-
-#         return self._get_obs(), reward, terminated, truncated, {}
-
-#     def destroy(self):
-#         for actor in self.actors:
-#             if actor is not None:
-#                 if isinstance(actor, carla.Sensor):
-#                     actor.stop()
-#                     actor.destroy()
-#                 else:
-#                     actor.destroy()
-#         self.actors = []
-
-#     def close(self):
-#         # # Save images and controls
-#         # data = np.array(self.images)
-#         # np.save("images.npy", data)
-#         # # np.savez_compressed('images.npz', array=data)
-#         # data = np.array(self.controls)
-#         # np.save("controls.npy", data)
-#         # # np.savez_compressed('controls.npz', array=data)
-
-#         # Ensure synchronous mode is turned off
-#         settings = self.world.get_settings()
-#         settings.synchronous_mode = False
-#         self.world.apply_settings(settings)
-
-#         self.destroy()
-
-
 if __name__ == "__main__":
     env = CarlaEnvContinuous(debug=True)
     env.reset()
@@ -667,10 +553,11 @@ if __name__ == "__main__":
         while time.time() - start_time < 100:
             # obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
             obs, reward, terminated, truncated, _ = env.step([1.0, 1.0])
-            print(reward)
+            # print(obs[0])
             # print(obs.shape)
             if terminated or truncated:
                 env.reset()
+            # time.sleep(0.05)
         print(f"Time elapsed: {time.time() - start_time}s")
     finally:
         env.close()

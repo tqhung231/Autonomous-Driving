@@ -117,22 +117,22 @@ if __name__ == "__main__":
         # Register the custom network
         policy_kwargs = dict(net_arch=dict(qf=[512, 256, 128], pi=[512, 256, 128]))
 
-        # Define the TD3 model
-        model = TD3(
-            MlpPolicy,
-            carla_env,
-            learning_rate=0.000000001,
-            # buffer_size=1000000,
-            learning_starts=1000,
-            batch_size=512,
-            # action_noise=normal_action_noise,
-            optimize_memory_usage=False,
-            policy_kwargs=policy_kwargs,
-            verbose=1,
-            device="cuda",
-        )
+        # # Define the TD3 model
+        # model = TD3(
+        #     MlpPolicy,
+        #     carla_env,
+        #     learning_rate=0.0001,
+        #     # buffer_size=1000000,
+        #     learning_starts=1000,
+        #     batch_size=512,
+        #     # action_noise=normal_action_noise,
+        #     optimize_memory_usage=False,
+        #     # policy_kwargs=policy_kwargs,
+        #     verbose=1,
+        #     device="cuda",
+        # )
 
-        # model = TD3.load("checkpoints/model", carla_env)
+        model = TD3.load("checkpoints/model_", carla_env)
 
         save_interval = 1000
         save_path = "checkpoints"
