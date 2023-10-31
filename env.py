@@ -16,6 +16,7 @@ events = [threading.Event() for _ in range(6)]
 SECTIONS = 18
 PART = 2
 MAX_DISTANCE = 50  # same as radar range
+SPEED_THRESHOLD = 100  # km/h
 
 DELTA_SECONDS = 0.05
 
@@ -79,6 +80,15 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         self._set_up_env()
 
+        # Define speed thresholds
+        self.optimal_speed = 80.0  # km/h
+        self.speed_limit = 100.0  # km/h
+
+        # Define reward and penalty factors
+        self.speed_reward_factor = 1.0
+        self.overspeed_penalty_factor = 2.0
+        self.steering_penalty_factor = 2.0
+
         # # Observations are dictionaries with the sensor data
         # self.observation_space = spaces.Dict(
         #     {
@@ -96,7 +106,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         low[0] = -1.0
         low[1] = -1.0
         high = np.full(39, 1.0)
-        high[2] = 2.0
+        high[2] = 3.0
         self.observation_space = spaces.Box(
             low=low, high=high, shape=(39,), dtype=np.float32
         )
@@ -179,9 +189,10 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         obs = self._get_obs()
 
-        reward = float(action[0] - abs(action[1]))
-        angle_to_goal = obs[0]
-        reward += 1 - abs(angle_to_goal)
+        # reward = float(action[0] - abs(action[1]))
+        # angle_to_goal = obs[0]
+        # reward += 1 - abs(angle_to_goal)
+        reward = self._calculate_reward(SPEED_THRESHOLD * obs[2], action[1])
 
         # if self.lane_invasion:
         #     print("Lane invasion")
@@ -383,7 +394,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         ego_speed = 3.6 * math.sqrt(
             ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2
         )  # speed in km/h
-        ego_speed = ego_speed / 100  # normalize to [0, 1]
+        ego_speed = ego_speed / SPEED_THRESHOLD  # normalize to [0, 1]
 
         # Angle to the Goal
         ego_orientation = ego_transform.rotation.yaw  # in degrees
@@ -444,6 +455,29 @@ class CarlaEnvContinuous(gymnasium.Env):
             ],
             dtype=np.float32,
         )
+
+    def _calculate_reward(self, speed, steering):
+        # Calculate speed-based reward/penalty
+        if speed <= self.optimal_speed:
+            speed_reward = self.speed_reward_factor * (speed / self.optimal_speed)
+        elif self.optimal_speed < speed <= self.speed_limit:
+            # Linearly decrease reward from optimal_speed to speed_limit
+            speed_reward = self.speed_reward_factor
+        else:
+            # Apply penalty for speeding above speed_limit
+            speed_reward = -self.overspeed_penalty_factor * (
+                (speed - self.speed_limit) / self.speed_limit
+            )
+
+        # Calculate steering penalty (increase with speed)
+        steering_penalty = (
+            self.steering_penalty_factor * abs(steering) * (speed / self.speed_limit)
+        )
+
+        # Combine rewards and penalties
+        total_reward = speed_reward - steering_penalty
+
+        return total_reward
 
     # Function to calculate the angle between two vectors
     def _calculate_angle(v1, v2):
@@ -599,8 +633,9 @@ if __name__ == "__main__":
                 # [1.0, random.uniform(-1, 1)]
                 [1.0, 0.0]
             )
-            # print(obs[0])
+            # print(SPEED_THRESHOLD * obs[2])
             # print(obs.shape)
+            print(reward)
             if terminated or truncated:
                 env.reset()
                 # print(len(env.spawn_points))

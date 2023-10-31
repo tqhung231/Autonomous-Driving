@@ -38,3 +38,6 @@ dự định thêm các reward khác nhưng hiện h cứ để reward đơn gi�
 relative position of the car to the center of the lane
 360 degree radar
 initialize traffic
+
+trừ điểm speed normal distribution
+speed càng cao trừ quẹo càng nhiều
