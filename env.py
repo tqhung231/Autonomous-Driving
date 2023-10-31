@@ -197,7 +197,6 @@ class CarlaEnvContinuous(gymnasium.Env):
 
     def _set_up_env(self):
         self._destroy()
-        self._tick()
 
         # Setup ego vehicle
         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
@@ -555,17 +554,15 @@ class CarlaEnvContinuous(gymnasium.Env):
     def _destroy(self):
         for actor in self.actors:
             if actor is not None:
-                if isinstance(actor, carla.Sensor):
-                    actor.stop()
+                if actor.is_alive:
                     actor.destroy()
-                else:
-                    actor.destroy()
-        self.actors = []
 
         for npc in self.npc:
             if npc is not None:
-                npc.destroy()
+                if npc.is_alive:
+                    npc.destroy()
 
+        self.actors = []
         self.npc = []
 
     def _close(self):
