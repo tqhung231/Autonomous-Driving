@@ -173,6 +173,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
             reward = 100.0
             print("Goal reached!")
+            self._follow_agent()
             self.goal_location = self._set_goal()
             return self._get_obs(), reward, terminated, truncated, {}
 
@@ -196,6 +197,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 
     def _set_up_env(self):
         self._destroy()
+        self._tick()
 
         # Setup ego vehicle
         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
@@ -590,7 +592,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 if __name__ == "__main__":
     env = CarlaEnvContinuous(debug=False)
     env.reset()
-    print(len(env.spawn_points))
+    # print(len(env.spawn_points))
     try:
         # Get the start time
         start_time = time.time()
@@ -604,8 +606,8 @@ if __name__ == "__main__":
             # print(obs.shape)
             if terminated or truncated:
                 env.reset()
-                print(len(env.spawn_points))
-            time.sleep(0.02)
+                # print(len(env.spawn_points))
+            # time.sleep(0.02)
         print(f"Time elapsed: {time.time() - start_time}s")
     except Exception as e:
         print(e)
