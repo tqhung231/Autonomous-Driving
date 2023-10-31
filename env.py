@@ -86,7 +86,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Define reward and penalty factors
         self.speed_reward_factor = 1.0
-        self.overspeed_penalty_factor = 2.0
+        self.overspeed_penalty_factor = 1.0
         self.steering_penalty_factor = 2.0
 
         # # Observations are dictionaries with the sensor data
