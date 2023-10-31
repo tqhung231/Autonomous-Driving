@@ -145,7 +145,7 @@ if __name__ == "__main__":
         # Train the model
         try:
             model.learn(
-                total_timesteps=1000000,
+                total_timesteps=10000000,
                 callback=checkpoint_callback,
                 # log_interval=1,
                 progress_bar=True,

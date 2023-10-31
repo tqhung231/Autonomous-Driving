@@ -189,10 +189,15 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         obs = self._get_obs()
 
-        # reward = float(action[0] - abs(action[1]))
+        reward = float(action[0] - abs(action[1]))
         # angle_to_goal = obs[0]
         # reward += 1 - abs(angle_to_goal)
-        reward = self._calculate_reward(SPEED_THRESHOLD * obs[2], action[1])
+        # reward = self._calculate_reward(SPEED_THRESHOLD * obs[2], action[1])
+        speed = SPEED_THRESHOLD * obs[2]
+        speed_reward = -self.overspeed_penalty_factor * (
+            (speed - self.speed_limit) / self.speed_limit
+        )
+        reward += speed_reward
 
         # if self.lane_invasion:
         #     print("Lane invasion")
