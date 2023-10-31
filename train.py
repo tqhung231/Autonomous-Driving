@@ -1,5 +1,6 @@
 import os
 import time
+from datetime import datetime
 
 import gymnasium as gym
 from stable_baselines3 import TD3
@@ -23,7 +24,9 @@ class SaveOnIntervalCallback(BaseCallback):
     def _on_step(self) -> bool:
         # This method will be called by the model at each call to `model.learn()`.
         if self.n_calls % self.save_interval == 0:
-            self.model.save(os.path.join(self.save_path, "model"))
+            self.model.save(
+                os.path.join(self.save_path, f"model_{datetime.now().hour}")
+            )
         return True
 
 
@@ -117,22 +120,22 @@ if __name__ == "__main__":
         # Register the custom network
         policy_kwargs = dict(net_arch=dict(qf=[512, 256, 128], pi=[512, 256, 128]))
 
-        # # Define the TD3 model
-        # model = TD3(
-        #     MlpPolicy,
-        #     carla_env,
-        #     learning_rate=0.0001,
-        #     # buffer_size=1000000,
-        #     learning_starts=1000,
-        #     batch_size=512,
-        #     # action_noise=normal_action_noise,
-        #     optimize_memory_usage=False,
-        #     # policy_kwargs=policy_kwargs,
-        #     verbose=1,
-        #     device="cuda",
-        # )
+        # Define the TD3 model
+        model = TD3(
+            MlpPolicy,
+            carla_env,
+            learning_rate=0.0001,
+            # buffer_size=1000000,
+            learning_starts=1000,
+            batch_size=512,
+            # action_noise=normal_action_noise,
+            optimize_memory_usage=False,
+            # policy_kwargs=policy_kwargs,
+            verbose=1,
+            device="cuda",
+        )
 
-        model = TD3.load("checkpoints/model_", carla_env)
+        # model = TD3.load("checkpoints/v2/model_11", carla_env)
 
         save_interval = 1000
         save_path = "checkpoints"
@@ -140,9 +143,12 @@ if __name__ == "__main__":
         checkpoint_callback = SaveOnIntervalCallback(save_interval, save_path)
 
         # Train the model
-        model.learn(
-            total_timesteps=1000000,
-            callback=checkpoint_callback,
-            log_interval=1,
-            progress_bar=True,
-        )
+        try:
+            model.learn(
+                total_timesteps=1000000,
+                callback=checkpoint_callback,
+                # log_interval=1,
+                progress_bar=True,
+            )
+        except Exception as e:
+            print(e)

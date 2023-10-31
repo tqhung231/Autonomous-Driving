@@ -31,6 +31,19 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Get the world
         self.world = self.client.get_world()
+        self.map = self.world.get_map()
+
+        # Set up spawn points
+        self.spawn_points = self.map.get_spawn_points()
+        # Read excluded spawn points from file
+        excluded_spawn_points = []
+        with open("excluded_spawn_points.txt", "r") as file:
+            for line in file:
+                # Convert each line to an integer and append to the list
+                excluded_spawn_points.append(int(line.strip()))
+        excluded_spawn_points.reverse()  # Reverse the list to remove from the end
+        for excluded_spawn_point in excluded_spawn_points:
+            self.spawn_points.pop(excluded_spawn_point)
 
         # Initialize Traffic Manager
         self.traffic_manager = self.client.get_trafficmanager(8000)
@@ -55,7 +68,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.frame = 0
         self.actors = []
         self.img_captured = None
-        self.collision = None
+        self.collision = []
         self.lane_invasion = None
         self.lidar_data = None
         self.radar_data_dict = {}
@@ -110,7 +123,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.frame = 0
         self.images = []
         self.img_captured = None
-        self.collision = None
+        self.collision = []
         self.lane_invasion = None
         self.lidar_data = None
         self.radar_data_dict = {}
@@ -131,7 +144,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         return observation, {}
 
     def step(self, action):
-        print(action)
+        # print(action)
         # self._follow_agent()
         # Set vehicle control
         if action[0] > 0:
@@ -151,14 +164,19 @@ class CarlaEnvContinuous(gymnasium.Env):
         terminated = False
         truncated = False
 
-        obs = self._get_obs()
-
-        if self.collision:
+        if len(self.collision) != 0:
             terminated = True
             reward = -100.0
-            self.collision = None
             print("Collision!")
-            return obs, reward, terminated, truncated, {}
+            return self._get_obs(), reward, terminated, truncated, {}
+
+        if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
+            reward = 100.0
+            print("Goal reached!")
+            self.goal_location = self._set_goal()
+            return self._get_obs(), reward, terminated, truncated, {}
+
+        obs = self._get_obs()
 
         reward = float(action[0] - abs(action[1]))
         angle_to_goal = obs[0]
@@ -169,15 +187,9 @@ class CarlaEnvContinuous(gymnasium.Env):
         #     reward -= 1
         #     self.lane_invasion = None
 
-        if self.frame >= 1000:
+        if self.frame >= 6000:
             truncated = True
             print("Time out!")
-            return obs, reward, terminated, truncated, {}
-
-        if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
-            terminated = True
-            reward += 100.0
-            print("Goal reached!")
             return obs, reward, terminated, truncated, {}
 
         return obs, reward, terminated, truncated, {}
@@ -185,15 +197,20 @@ class CarlaEnvContinuous(gymnasium.Env):
     def _set_up_env(self):
         self._destroy()
 
-        # Set ego vehicle spawn point
-        spawn_points = self.world.get_map().get_spawn_points()
-        chosen_spawn_point = spawn_points.pop(random.randint(0, len(spawn_points) - 1))
-        # self.chosen_spawn_point = spawn_points[347]
-
         # Setup ego vehicle
         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
         vehicle_bp.set_attribute("color", "0,0,0")
-        self.ego_vehicle = self.world.spawn_actor(vehicle_bp, chosen_spawn_point)
+        spawn_points = self.spawn_points.copy()
+        chosen_spawn_point = spawn_points.pop(random.randint(0, len(spawn_points) - 1))
+        # chosen_spawn_point = spawn_points.pop(random.randint(345, 352))
+        self.ego_vehicle = self.world.try_spawn_actor(vehicle_bp, chosen_spawn_point)
+        while self.ego_vehicle is None:
+            chosen_spawn_point = spawn_points.pop(
+                random.randint(0, len(spawn_points) - 1)
+            )
+            self.ego_vehicle = self.world.try_spawn_actor(
+                vehicle_bp, chosen_spawn_point
+            )
 
         # # Setup RGB camera
         # camera_bp = self.blueprint_library.find("sensor.camera.rgb")
@@ -303,8 +320,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 
     def _set_goal(self):
         ego_location = self.ego_vehicle.get_location()
-        map = self.world.get_map()
-        initial_waypoint = map.get_waypoint(ego_location)
+        initial_waypoint = self.map.get_waypoint(ego_location)
 
         distance_to_travel = 110
         distance_traveled = 0
@@ -341,6 +357,23 @@ class CarlaEnvContinuous(gymnasium.Env):
         return goal_location
 
     def _get_obs(self):
+        # # Get the current waypoint of the vehicle
+        ego_transform = self.ego_vehicle.get_transform()
+        ego_location = ego_transform.location
+        # ego_waypoint = self.world.get_map().get_waypoint(ego_location)
+
+        # # Get the vehicle's location and forward vector
+        # vehicle_forward = ego_transform.get_forward_vector()
+
+        # # Find the closest road waypoint to the vehicle's location
+        # map = self.world.get_map()
+        # ego_waypoint = map.get_waypoint(ego_location)
+
+        # # Calculate the offset from the center of the road
+        # road_forward = ego_waypoint.transform.rotation.get_forward_vector()
+        # angle = self._calculate_angle(vehicle_forward, road_forward)
+        # offset = math.sin(angle)
+
         # Steering Angle
         steering_angle = self.ego_vehicle.get_control().steer  # [-1, 1]
 
@@ -352,8 +385,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         ego_speed = ego_speed / 100  # normalize to [0, 1]
 
         # Angle to the Goal
-        ego_location = self.ego_vehicle.get_location()
-        ego_orientation = self.ego_vehicle.get_transform().rotation.yaw  # in degrees
+        ego_orientation = ego_transform.rotation.yaw  # in degrees
         # print(f"Ego orientation: {ego_orientation}")
 
         # Calculate the direction to the goal in degrees
@@ -412,6 +444,14 @@ class CarlaEnvContinuous(gymnasium.Env):
             dtype=np.float32,
         )
 
+    # Function to calculate the angle between two vectors
+    def _calculate_angle(v1, v2):
+        dot_product = v1.x * v2.x + v1.y * v2.y
+        v1_length = math.sqrt(v1.x**2 + v1.y**2)
+        v2_length = math.sqrt(v2.x**2 + v2.y**2)
+        angle = math.acos(dot_product / (v1_length * v2_length))
+        return angle
+
     def _tick(self):
         self.world.tick()
         self.frame += 1
@@ -468,7 +508,7 @@ class CarlaEnvContinuous(gymnasium.Env):
                     )
 
     def _on_collision(self, event):
-        self.collision = event
+        self.collision.append(event)
 
     def _on_lane_invasion(self, event):
         self.lane_invasion = event
@@ -481,8 +521,8 @@ class CarlaEnvContinuous(gymnasium.Env):
         car_transform = self.ego_vehicle.get_transform()
 
         # Modify the transform to move the spectator
-        car_transform.location.z = 50
-        car_transform.rotation.pitch = -70
+        car_transform.location.z = 75
+        car_transform.rotation.pitch = -60
 
         # Set the spectator's transform
         spectator.set_transform(car_transform)
@@ -526,7 +566,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         self.npc = []
 
-    def close(self):
+    def _close(self):
         # # Save images and controls
         # data = np.array(self.images)
         # np.save("images.npy", data)
@@ -543,21 +583,31 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         self._destroy()
 
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._close()
+
 
 if __name__ == "__main__":
-    env = CarlaEnvContinuous(debug=True)
+    env = CarlaEnvContinuous(debug=False)
     env.reset()
+    print(len(env.spawn_points))
     try:
         # Get the start time
         start_time = time.time()
-        while time.time() - start_time < 100:
+        while time.time() - start_time < 1000000000:
             # obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
-            obs, reward, terminated, truncated, _ = env.step([1.0, 1.0])
+            obs, reward, terminated, truncated, _ = env.step(
+                # [1.0, random.uniform(-1, 1)]
+                [1.0, 0.0]
+            )
             # print(obs[0])
             # print(obs.shape)
             if terminated or truncated:
                 env.reset()
-            # time.sleep(0.05)
+                print(len(env.spawn_points))
+            time.sleep(0.02)
         print(f"Time elapsed: {time.time() - start_time}s")
+    except Exception as e:
+        print(e)
     finally:
-        env.close()
+        env._close()
