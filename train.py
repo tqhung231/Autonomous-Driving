@@ -124,7 +124,7 @@ if __name__ == "__main__":
         model = TD3(
             MlpPolicy,
             carla_env,
-            learning_rate=0.0001,
+            learning_rate=0.00001,
             # buffer_size=1000000,
             learning_starts=1000,
             batch_size=512,
