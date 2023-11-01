@@ -16,7 +16,7 @@ events = [threading.Event() for _ in range(6)]
 SECTIONS = 18
 PART = 2
 MAX_DISTANCE = 50  # same as radar range
-SPEED_THRESHOLD = 100  # km/h
+SPEED_LIMIT = 80  # km/h
 
 DELTA_SECONDS = 0.05
 
@@ -81,8 +81,8 @@ class CarlaEnvContinuous(gymnasium.Env):
         self._set_up_env()
 
         # Define speed thresholds
-        self.optimal_speed = 80.0  # km/h
-        self.speed_limit = 80.0  # km/h
+        # self.optimal_speed = 80.0  # km/h
+        self.speed_limit = SPEED_LIMIT  # km/h
 
         # Define reward and penalty factors
         self.speed_reward_factor = 1.0
@@ -192,8 +192,8 @@ class CarlaEnvContinuous(gymnasium.Env):
         # reward = float(action[0] - abs(action[1]) - abs(obs[0]))
         # angle_to_goal = obs[0]
         # reward += 1 - abs(angle_to_goal)
-        # reward = self._calculate_reward(SPEED_THRESHOLD * obs[2], action[1])
-        speed = SPEED_THRESHOLD * obs[2]
+        # reward = self._calculate_reward(SPEED_LIMIT * obs[2], action[1])
+        speed = SPEED_LIMIT * obs[2]
         if speed >= self.speed_limit:
             reward = -self.overspeed_penalty_factor * (
                 (speed - self.speed_limit) / self.speed_limit
@@ -401,7 +401,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         ego_speed = 3.6 * math.sqrt(
             ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2
         )  # speed in km/h
-        ego_speed = ego_speed / SPEED_THRESHOLD  # normalize to [0, 1]
+        ego_speed = ego_speed / SPEED_LIMIT  # normalize to [0, 1]
 
         # Angle to the Goal
         ego_orientation = ego_transform.rotation.yaw  # in degrees
@@ -640,7 +640,7 @@ if __name__ == "__main__":
                 # [1.0, random.uniform(-1, 1)]
                 [1.0, 0.0]
             )
-            # print(SPEED_THRESHOLD * obs[2])
+            # print(SPEED_LIMIT * obs[2])
             # print(obs.shape)
             print(reward)
             if terminated or truncated:
