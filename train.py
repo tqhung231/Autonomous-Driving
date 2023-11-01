@@ -120,11 +120,16 @@ if __name__ == "__main__":
         # Register the custom network
         policy_kwargs = dict(net_arch=dict(qf=[512, 256, 128], pi=[512, 256, 128]))
 
+        initial_learning_rate = 0.00001
+        lr_schedule = linear_schedule_with_min(
+            initial_learning_rate, min_value=1e-7, decay_fraction=0.2
+        )
+
         # Define the TD3 model
         model = TD3(
             MlpPolicy,
             carla_env,
-            learning_rate=0.00001,
+            learning_rate=initial_learning_rate,
             # buffer_size=1000000,
             learning_starts=1000,
             batch_size=512,
@@ -135,7 +140,7 @@ if __name__ == "__main__":
             device="cuda",
         )
 
-        # model = TD3.load("checkpoints/v2/model_11", carla_env)
+        model = TD3.load("checkpoints/model_22", carla_env, learning_rate=lr_schedule)
 
         save_interval = 1000
         save_path = "checkpoints"

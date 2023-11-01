@@ -82,11 +82,11 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Define speed thresholds
         self.optimal_speed = 80.0  # km/h
-        self.speed_limit = 100.0  # km/h
+        self.speed_limit = 80.0  # km/h
 
         # Define reward and penalty factors
         self.speed_reward_factor = 1.0
-        self.overspeed_penalty_factor = 1.0
+        self.overspeed_penalty_factor = 2.0
         self.steering_penalty_factor = 2.0
 
         # # Observations are dictionaries with the sensor data
@@ -329,9 +329,9 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Spawn NPC vehicles
         # self.num_npc = num_npc
-        for sp in sampled_spawn_points:
-            npc = self._spawn_npc(sp)
-            self.npc.append(npc)
+        # for sp in sampled_spawn_points:
+        #     npc = self._spawn_npc(sp)
+        #     self.npc.append(npc)
 
         # Setup goal location
         self.goal_location = self._set_goal()
