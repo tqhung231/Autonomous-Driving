@@ -181,7 +181,7 @@ class CarlaEnvContinuous(gymnasium.Env):
             return self._get_obs(), reward, terminated, truncated, {}
 
         if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
-            reward = 100.0
+            reward = 20.0
             print("Goal reached!")
             self._follow_agent()
             self.goal_location = self._set_goal()
@@ -189,16 +189,17 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         obs = self._get_obs()
 
-        reward = float(action[0] - abs(action[1]) - abs(obs[0]))
+        # reward = float(action[0] - abs(action[1]) - abs(obs[0]))
         # angle_to_goal = obs[0]
         # reward += 1 - abs(angle_to_goal)
         # reward = self._calculate_reward(SPEED_THRESHOLD * obs[2], action[1])
         speed = SPEED_THRESHOLD * obs[2]
         if speed >= self.speed_limit:
-            speed_reward = -self.overspeed_penalty_factor * (
+            reward = -self.overspeed_penalty_factor * (
                 (speed - self.speed_limit) / self.speed_limit
             )
-            reward += speed_reward
+        else:
+            reward = float(action[0] - abs(action[1]) - abs(obs[0]))
 
         # if self.lane_invasion:
         #     print("Lane invasion")
@@ -316,18 +317,18 @@ class CarlaEnvContinuous(gymnasium.Env):
         # Tick the world
         self.world.tick()
 
-        # Get a list of spawn points and filter for points near the ego vehicle
-        nearby_spawn_points = [
-            sp
-            for sp in spawn_points
-            if sp.location.distance(self.ego_vehicle.get_location()) < 50
-        ]
+        # # Get a list of spawn points and filter for points near the ego vehicle
+        # nearby_spawn_points = [
+        #     sp
+        #     for sp in spawn_points
+        #     if sp.location.distance(self.ego_vehicle.get_location()) < 50
+        # ]
 
-        sampled_spawn_points = random.sample(
-            nearby_spawn_points, len(nearby_spawn_points) // 2
-        )
+        # sampled_spawn_points = random.sample(
+        #     nearby_spawn_points, len(nearby_spawn_points) // 2
+        # )
 
-        # Spawn NPC vehicles
+        # # Spawn NPC vehicles
         # self.num_npc = num_npc
         # for sp in sampled_spawn_points:
         #     npc = self._spawn_npc(sp)
