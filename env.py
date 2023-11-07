@@ -3,6 +3,7 @@ import random
 import threading
 import time
 from datetime import datetime
+import matplotlib.pyplot as plt
 
 import carla
 import gymnasium
@@ -16,7 +17,10 @@ events = [threading.Event() for _ in range(6)]
 SECTIONS = 18
 PART = 2
 MAX_DISTANCE = 50  # same as radar range
+SPEED_NORMALIZATION = 100
+OPTIMAL_SPEED = 60  # km/h
 SPEED_LIMIT = 80  # km/h
+SPEED_LOWER_BOUND = 20  # km/h
 
 DELTA_SECONDS = 0.05
 
@@ -36,6 +40,7 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         # Set up spawn points
         self.spawn_points = self.map.get_spawn_points()
+        self.ego_spawn_points = self.spawn_points.copy()
         # Read excluded spawn points from file
         excluded_spawn_points = []
         with open("excluded_spawn_points.txt", "r") as file:
@@ -44,7 +49,7 @@ class CarlaEnvContinuous(gymnasium.Env):
                 excluded_spawn_points.append(int(line.strip()))
         excluded_spawn_points.reverse()  # Reverse the list to remove from the end
         for excluded_spawn_point in excluded_spawn_points:
-            self.spawn_points.pop(excluded_spawn_point)
+            self.ego_spawn_points.pop(excluded_spawn_point)
 
         # Initialize Traffic Manager
         self.traffic_manager = self.client.get_trafficmanager(8000)
@@ -79,14 +84,18 @@ class CarlaEnvContinuous(gymnasium.Env):
         self.blueprint_library = self.world.get_blueprint_library()
 
         self._set_up_env()
+        # self._spawn_npc()
 
         # Define speed thresholds
-        # self.optimal_speed = 80.0  # km/h
+        self.optimal_speed = OPTIMAL_SPEED  # km/h
         self.speed_limit = SPEED_LIMIT  # km/h
+        self.speed_lower_bound = SPEED_LOWER_BOUND  # km/h
+        self.speed_lower_slope = 1 / self.speed_lower_bound
+        self.speed_upper_slope = 1 / (self.optimal_speed - self.speed_lower_bound)
 
         # Define reward and penalty factors
         self.speed_reward_factor = 1.0
-        self.overspeed_penalty_factor = 2.0
+        self.overspeed_penalty_factor = 5.0
         self.steering_penalty_factor = 2.0
 
         # # Observations are dictionaries with the sensor data
@@ -127,7 +136,11 @@ class CarlaEnvContinuous(gymnasium.Env):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
 
-        self._set_up_env()
+        result = self._set_up_env()
+        while not result:
+            for _ in range(10):
+                self.world.tick()
+            result = self._set_up_env()
 
         # Reset the data
         self.frame = 0
@@ -181,25 +194,28 @@ class CarlaEnvContinuous(gymnasium.Env):
             return self._get_obs(), reward, terminated, truncated, {}
 
         if self.ego_vehicle.get_location().distance(self.goal_location) < 10:
-            reward = 20.0
+            # terminated = True
+            reward = 100.0
             print("Goal reached!")
-            self._follow_agent()
-            self.goal_location = self._set_goal()
+            # self._follow_agent()
+            self.goal_location = self._set_goal(location=self.goal_location)
             return self._get_obs(), reward, terminated, truncated, {}
 
         obs = self._get_obs()
 
+        speed = SPEED_NORMALIZATION * obs[2]
         # reward = float(action[0] - abs(action[1]) - abs(obs[0]))
         # angle_to_goal = obs[0]
         # reward += 1 - abs(angle_to_goal)
-        # reward = self._calculate_reward(SPEED_LIMIT * obs[2], action[1])
-        speed = SPEED_LIMIT * obs[2]
-        if speed >= self.speed_limit:
-            reward = -self.overspeed_penalty_factor * (
-                (speed - self.speed_limit) / self.speed_limit
-            )
-        else:
-            reward = float(action[0] - abs(action[1]) - abs(obs[0]))
+        reward = self._calculate_reward(speed)
+
+        # if speed >= self.speed_limit:
+        #     reward = -self.overspeed_penalty_factor * (
+        #         (speed - self.speed_limit) / self.speed_limit
+        #     )
+        # else:
+        #     reward = float(action[0] - 2 * abs(action[1]) - abs(obs[0]))
+        # if speed <= self.optimal_speed:
 
         # if self.lane_invasion:
         #     print("Lane invasion")
@@ -219,7 +235,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         # Setup ego vehicle
         vehicle_bp = self.blueprint_library.find("vehicle.tesla.model3")
         vehicle_bp.set_attribute("color", "0,0,0")
-        spawn_points = self.spawn_points.copy()
+        spawn_points = self.ego_spawn_points.copy()
         chosen_spawn_point = spawn_points.pop(random.randint(0, len(spawn_points) - 1))
         # chosen_spawn_point = spawn_points.pop(random.randint(345, 352))
         self.ego_vehicle = self.world.try_spawn_actor(vehicle_bp, chosen_spawn_point)
@@ -230,6 +246,8 @@ class CarlaEnvContinuous(gymnasium.Env):
             self.ego_vehicle = self.world.try_spawn_actor(
                 vehicle_bp, chosen_spawn_point
             )
+        if self.ego_vehicle is None:
+            return False
 
         # # Setup RGB camera
         # camera_bp = self.blueprint_library.find("sensor.camera.rgb")
@@ -337,18 +355,23 @@ class CarlaEnvContinuous(gymnasium.Env):
         # Setup goal location
         self.goal_location = self._set_goal()
 
-    def _set_goal(self):
-        ego_location = self.ego_vehicle.get_location()
-        initial_waypoint = self.map.get_waypoint(ego_location)
+        return True
 
-        distance_to_travel = 110
+    def _set_goal(self, location=None, spacing=1.0):
+        if location:
+            initial_waypoint = self.map.get_waypoint(location)
+        else:
+            ego_location = self.ego_vehicle.get_location()
+            initial_waypoint = self.map.get_waypoint(ego_location)
+
+        distance_to_travel = 20
         distance_traveled = 0
         current_waypoint = initial_waypoint
 
         while distance_traveled < distance_to_travel:
             # Get the next waypoint along the road
             next_waypoints = current_waypoint.next(
-                1.0
+                spacing
             )  # Adjust the distance to the next waypoint as needed
             if not next_waypoints:
                 # No more waypoints, end the loop
@@ -356,14 +379,31 @@ class CarlaEnvContinuous(gymnasium.Env):
             next_waypoint = next_waypoints[0]
 
             # Update the distance traveled
-            distance_traveled += next_waypoint.transform.location.distance(
-                current_waypoint.transform.location
-            )
+            distance_traveled += spacing
 
             # Update the current waypoint for the next iteration
             current_waypoint = next_waypoint
 
-        goal_location = current_waypoint.transform.location
+        waypoints = self._get_waypoints_across_lanes(current_waypoint)
+
+        # Initialize sums
+        sum_x = 0
+        sum_y = 0
+        sum_z = 0
+
+        # Sum up the coordinates
+        for waypoint in waypoints:
+            sum_x += waypoint.transform.location.x
+            sum_y += waypoint.transform.location.y
+            sum_z += waypoint.transform.location.z
+
+        # Compute the average
+        center_x = sum_x / len(waypoints)
+        center_y = sum_y / len(waypoints)
+        center_z = sum_z / len(waypoints)
+
+        # The center location
+        goal_location = carla.Location(x=center_x, y=center_y, z=center_z)
 
         self.world.debug.draw_point(
             goal_location,
@@ -376,35 +416,20 @@ class CarlaEnvContinuous(gymnasium.Env):
         return goal_location
 
     def _get_obs(self):
-        # # Get the current waypoint of the vehicle
         ego_transform = self.ego_vehicle.get_transform()
         ego_location = ego_transform.location
-        # ego_waypoint = self.world.get_map().get_waypoint(ego_location)
-
-        # # Get the vehicle's location and forward vector
-        # vehicle_forward = ego_transform.get_forward_vector()
-
-        # # Find the closest road waypoint to the vehicle's location
-        # map = self.world.get_map()
-        # ego_waypoint = map.get_waypoint(ego_location)
-
-        # # Calculate the offset from the center of the road
-        # road_forward = ego_waypoint.transform.rotation.get_forward_vector()
-        # angle = self._calculate_angle(vehicle_forward, road_forward)
-        # offset = math.sin(angle)
-
-        # Steering Angle
-        steering_angle = self.ego_vehicle.get_control().steer  # [-1, 1]
+        ego_rotation = ego_transform.rotation
+        waypoint = self.map.get_waypoint(ego_location)
 
         # Speed
         ego_velocity = self.ego_vehicle.get_velocity()
         ego_speed = 3.6 * math.sqrt(
             ego_velocity.x**2 + ego_velocity.y**2 + ego_velocity.z**2
         )  # speed in km/h
-        ego_speed = ego_speed / SPEED_LIMIT  # normalize to [0, 1]
+        ego_speed = ego_speed / SPEED_NORMALIZATION  # normalize to [0, 1]
 
         # Angle to the Goal
-        ego_orientation = ego_transform.rotation.yaw  # in degrees
+        ego_orientation = ego_rotation.yaw  # in degrees
         # print(f"Ego orientation: {ego_orientation}")
 
         # Calculate the direction to the goal in degrees
@@ -422,6 +447,18 @@ class CarlaEnvContinuous(gymnasium.Env):
         # Normalize further to the range [-1, 1]
         angle_to_goal_normalized = angle_to_goal / 180.0
         # print(f"Angle to goal: {angle_to_goal_normalized}")
+
+        # Angle to the road
+        road_orientation = waypoint.transform.rotation.yaw
+        # Calculate the angle difference
+        angle_to_road = ego_orientation - road_orientation
+        # Normalize to range [-180, 180]
+        angle_to_road %= 360
+        if angle_to_road > 180:
+            angle_to_road -= 360
+        # Normalize further to the range [-1, 1]
+        angle_to_road_normalized = angle_to_road / 180.0
+        # print(angle_to_road_normalized)
 
         # with sem:
         #     return self.img_captured
@@ -457,34 +494,44 @@ class CarlaEnvContinuous(gymnasium.Env):
 
         return np.concatenate(
             [
-                [angle_to_goal_normalized, steering_angle, ego_speed],
+                [angle_to_goal_normalized, angle_to_road_normalized, ego_speed],
                 combined_data,
             ],
             dtype=np.float32,
         )
 
-    def _calculate_reward(self, speed, steering):
+    def _calculate_reward(self, speed):
         # Calculate speed-based reward/penalty
-        if speed <= self.optimal_speed:
-            speed_reward = self.speed_reward_factor * (speed / self.optimal_speed)
-        elif self.optimal_speed < speed <= self.speed_limit:
-            # Linearly decrease reward from optimal_speed to speed_limit
+        if speed <= self.speed_lower_bound:
+            speed_reward = (speed - self.speed_lower_bound) * self.speed_lower_slope
+        elif speed <= self.optimal_speed:
+            speed_reward = (speed - self.speed_lower_bound) * self.speed_upper_slope
+        elif speed <= self.speed_limit:
             speed_reward = self.speed_reward_factor
         else:
-            # Apply penalty for speeding above speed_limit
-            speed_reward = -self.overspeed_penalty_factor * (
-                (speed - self.speed_limit) / self.speed_limit
+            speed_reward = (
+                -speed * self.speed_lower_slope + self.overspeed_penalty_factor
             )
+        # if speed <= self.optimal_speed:
+        #     speed_reward = self.speed_reward_factor * (speed / self.optimal_speed)
+        # elif self.optimal_speed < speed <= self.speed_limit:
+        #     # Linearly decrease reward from optimal_speed to speed_limit
+        #     speed_reward = self.speed_reward_factor
+        # else:
+        #     # Apply penalty for speeding above speed_limit
+        #     speed_reward = -self.overspeed_penalty_factor * (
+        #         (speed - self.speed_limit) / self.speed_limit
+        #     )
 
-        # Calculate steering penalty (increase with speed)
-        steering_penalty = (
-            self.steering_penalty_factor * abs(steering) * (speed / self.speed_limit)
-        )
+        # # Calculate steering penalty (increase with speed)
+        # steering_penalty = (
+        #     self.steering_penalty_factor * abs(steering) * (speed / self.speed_limit)
+        # )
 
-        # Combine rewards and penalties
-        total_reward = speed_reward - steering_penalty
+        # # Combine rewards and penalties
+        # total_reward = speed_reward - steering_penalty
 
-        return total_reward
+        return speed_reward
 
     # Function to calculate the angle between two vectors
     def _calculate_angle(v1, v2):
@@ -493,6 +540,41 @@ class CarlaEnvContinuous(gymnasium.Env):
         v2_length = math.sqrt(v2.x**2 + v2.y**2)
         angle = math.acos(dot_product / (v1_length * v2_length))
         return angle
+
+    def _get_waypoints_across_lanes(self, waypoint):
+        """
+        Get waypoints across different lanes given an initial waypoint.
+
+        Args:
+        - waypoint: The initial CARLA waypoint.
+
+        Returns:
+        - A list of waypoints across different lanes.
+        """
+        waypoints_across_lanes = []
+
+        # Add the initial waypoint to the list
+        waypoints_across_lanes.append(waypoint)
+
+        # Get waypoints on the left lanes
+        left_waypoint = waypoint.get_left_lane()
+        while (
+            left_waypoint is not None
+            and left_waypoint.lane_type == carla.LaneType.Driving
+        ):
+            waypoints_across_lanes.append(left_waypoint)
+            left_waypoint = left_waypoint.get_left_lane()
+
+        # Get waypoints on the right lanes
+        right_waypoint = waypoint.get_right_lane()
+        while (
+            right_waypoint is not None
+            and right_waypoint.lane_type == carla.LaneType.Driving
+        ):
+            waypoints_across_lanes.append(right_waypoint)
+            right_waypoint = right_waypoint.get_right_lane()
+
+        return waypoints_across_lanes
 
     def _tick(self):
         self.world.tick()
@@ -570,27 +652,33 @@ class CarlaEnvContinuous(gymnasium.Env):
         spectator.set_transform(car_transform)
         # spectator.set_transform(self.camera.get_transform())
 
-    def _spawn_npc(self, spawn_point):
-        # Get a random blueprint.
-        blueprint = random.choice(
-            self.world.get_blueprint_library().filter("vehicle.*")
+    def _spawn_npc(self):
+        sampled_spawn_points = random.sample(
+            self.spawn_points, len(self.spawn_points) // 2
         )
 
-        # Some vehicles do not support autopilot, so we need to check and possibly choose again.
-        while (
-            blueprint.has_attribute("number_of_wheels")
-            and int(blueprint.get_attribute("number_of_wheels")) < 4
-        ):
+        # Spawn NPC vehicles
+        for sp in sampled_spawn_points:
+            # Get a random blueprint.
             blueprint = random.choice(
                 self.world.get_blueprint_library().filter("vehicle.*")
             )
 
-        # Spawn the vehicle
-        vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
-        if vehicle:
-            vehicle.set_autopilot(True)
+            # Some vehicles do not support autopilot, so we need to check and possibly choose again.
+            while (
+                blueprint.has_attribute("number_of_wheels")
+                and int(blueprint.get_attribute("number_of_wheels")) < 4
+            ):
+                blueprint = random.choice(
+                    self.world.get_blueprint_library().filter("vehicle.*")
+                )
 
-        return vehicle
+            # Spawn the vehicle
+            vehicle = self.world.try_spawn_actor(blueprint, sp)
+            if vehicle:
+                vehicle.set_autopilot(True)
+
+            self.npc.append(vehicle)
 
     def _destroy(self):
         for actor in self.actors:
@@ -598,13 +686,13 @@ class CarlaEnvContinuous(gymnasium.Env):
                 if actor.is_alive:
                     actor.destroy()
 
-        for npc in self.npc:
-            if npc is not None:
-                if npc.is_alive:
-                    npc.destroy()
+        # for npc in self.npc:
+        #     if npc is not None:
+        #         if npc.is_alive:
+        #             npc.destroy()
 
         self.actors = []
-        self.npc = []
+        # self.npc = []
 
     def _close(self):
         # # Save images and controls
@@ -621,14 +709,25 @@ class CarlaEnvContinuous(gymnasium.Env):
         settings.synchronous_mode = False
         self.world.apply_settings(settings)
 
-        self._destroy()
+        for actor in self.actors:
+            if actor is not None:
+                if actor.is_alive:
+                    actor.destroy()
+
+        for npc in self.npc:
+            if npc is not None:
+                if npc.is_alive:
+                    npc.destroy()
+
+        self.actors = []
+        self.npc = []
 
     def __exit__(self, exc_type, exc_value, traceback):
         self._close()
 
 
 if __name__ == "__main__":
-    env = CarlaEnvContinuous(debug=False)
+    env = CarlaEnvContinuous(debug=True)
     env.reset()
     # print(len(env.spawn_points))
     try:
@@ -637,16 +736,18 @@ if __name__ == "__main__":
         while time.time() - start_time < 1000000000:
             # obs, _, terminated, truncated, _ = env.step(env.action_space.sample())
             obs, reward, terminated, truncated, _ = env.step(
+                # [(random.random() ** 0.3) * 2 - 1, random.uniform(-1, 1)]
                 # [1.0, random.uniform(-1, 1)]
                 [1.0, 0.0]
             )
-            # print(SPEED_LIMIT * obs[2])
+            # print(SPEED_THRESHOLD * obs[2])
             # print(obs.shape)
+            # print(obs[1])
             print(reward)
             if terminated or truncated:
                 env.reset()
                 # print(len(env.spawn_points))
-            # time.sleep(0.02)
+            # time.sleep(0.05)
         print(f"Time elapsed: {time.time() - start_time}s")
     except Exception as e:
         print(e)

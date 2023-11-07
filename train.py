@@ -12,6 +12,7 @@ from stable_baselines3.common.noise import (
 )
 from stable_baselines3.td3.policies import CnnPolicy, MlpPolicy
 
+# import create_model
 from env import CarlaEnvContinuous
 
 
@@ -42,7 +43,10 @@ def linear_schedule(initial_value: float):
 
 
 def linear_schedule_with_min(
-    initial_value: float, min_value: float = 1e-4, decay_fraction: float = 0.5
+    initial_value: float,
+    min_value: float = 1e-4,
+    keep_fraction=0.5,
+    decay_fraction: float = 0.5,
 ):
     def func(progress_remaining: float) -> float:
         """
@@ -50,9 +54,11 @@ def linear_schedule_with_min(
         `initial_value` and `min_value` that linearly decreases.
         For the remaining part of the training, it returns `min_value`.
         """
-        if progress_remaining > (1 - decay_fraction):
+        if progress_remaining > (1 - keep_fraction):
+            return initial_value
+        elif progress_remaining > (1 - decay_fraction):
             return initial_value - (initial_value - min_value) * (
-                (1 - progress_remaining) / decay_fraction
+                (1 - keep_fraction - progress_remaining) / decay_fraction
             )
         else:
             return min_value
@@ -118,29 +124,45 @@ if __name__ == "__main__":
         )
 
         # Register the custom network
-        policy_kwargs = dict(net_arch=dict(qf=[512, 256, 128], pi=[512, 256, 128]))
+        policy_kwargs = dict(net_arch=dict(qf=[128, 256, 128, 64], pi=[128, 256, 128, 64]))
 
-        initial_learning_rate = 1e-5
-        lr_schedule = linear_schedule_with_min(
-            initial_learning_rate, min_value=1e-7, decay_fraction=0.2
+        initial_learning_rate = 1e-4
+        # lr_schedule = linear_schedule_with_min(
+        #     initial_learning_rate, min_value=1e-5, keep_fraction=0.1, decay_fraction=0.2
+        # )
+        lr_schedule = stepped_schedule(initial_learning_rate, min_lr=1e-5)
+
+        # Define the TD3 model
+        model = TD3(
+            MlpPolicy,
+            carla_env,
+            learning_rate=lr_schedule,
+            buffer_size=10000000,
+            learning_starts=6000,
+            batch_size=512,
+            # action_noise=normal_action_noise,
+            optimize_memory_usage=False,
+            policy_kwargs=policy_kwargs,
+            verbose=1,
+            device="cuda",
         )
 
         # # Define the TD3 model
         # model = TD3(
-        #     MlpPolicy,
+        #     "TD3DensePolicy",
         #     carla_env,
-        #     learning_rate=initial_learning_rate,
-        #     # buffer_size=1000000,
-        #     learning_starts=1000,
+        #     learning_rate=lr_schedule,
+        #     buffer_size=10000000,
+        #     learning_starts=6000,
         #     batch_size=512,
         #     # action_noise=normal_action_noise,
         #     optimize_memory_usage=False,
-        #     # policy_kwargs=policy_kwargs,
+        #     policy_kwargs=policy_kwargs,
         #     verbose=1,
         #     device="cuda",
         # )
 
-        model = TD3.load("checkpoints/model_22", carla_env, learning_rate=lr_schedule)
+        # model = TD3.load("checkpoints/model_9_", carla_env, learning_rate=1e-6)
 
         save_interval = 1000
         save_path = "checkpoints"
@@ -150,7 +172,7 @@ if __name__ == "__main__":
         # Train the model
         try:
             model.learn(
-                total_timesteps=10000000,
+                total_timesteps=4000000,
                 callback=checkpoint_callback,
                 # log_interval=1,
                 progress_bar=True,
