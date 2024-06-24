@@ -1,118 +1,281 @@
-from typing import List, Optional, Tuple, Type
+from typing import Any, Dict, List, Optional, Type, Union
 
 import gymnasium as gym
 import torch as th
-import torch.nn as nn
-from stable_baselines3.common.policies import Actor, BaseFeaturesExtractor, TD3Policy, BaseModel
-from stable_baselines3.common.torch_layers import BaseFeaturesExtractor, create_mlp
-from stable_baselines3.common.utils import get_action_dim
+from gymnasium import spaces
+from stable_baselines3 import TD3
+from stable_baselines3.common.preprocessing import get_flattened_obs_dim, is_image_space
+from stable_baselines3.common.torch_layers import BaseFeaturesExtractor
+from stable_baselines3.common.type_aliases import Schedule, TensorDict
+from stable_baselines3.td3.policies import TD3Policy
+from torch import nn
 
 
-class CustomActor(Actor):
+class ComplexCNN(BaseFeaturesExtractor):
     """
-    Actor network (policy) for TD3.
-    """
-
-    def __init__(self, *args, **kwargs):
-        super(CustomActor, self).__init__(*args, **kwargs)
-        # Define custom network with Dropout
-        # Example architecture with dropout before the last layer:
-        # (Modify according to your needs)
-        net_arch = kwargs.get("net_arch", [400, 300])
-        dropout_rate = kwargs.get("dropout_rate", 0.2)
-
-        layers = []
-        for i in range(len(net_arch)):
-            layers.append(
-                nn.Linear(net_arch[i - 1] if i > 0 else self.features_dim, net_arch[i])
-            )
-            layers.append(nn.ReLU())
-            if (
-                i < len(net_arch) - 1
-            ):  # typically, you don't apply dropout right before the output layer
-                layers.append(nn.Dropout(p=dropout_rate))
-
-        layers.append(nn.Linear(net_arch[-1], self.action_space.shape[0]))
-        layers.append(nn.Tanh())  # Output is squashed via tanh
-
-        self.mu = nn.Sequential(*layers)
-
-
-class CustomContinuousCritic(BaseModel):
-    """
-    Critic network(s) for DDPG/SAC/TD3.
+    More complex CNN based on the DQN Nature paper, with additional layers and batch normalization.
     """
 
     def __init__(
         self,
-        observation_space: gym.spaces.Space,
-        action_space: gym.spaces.Space,
-        net_arch: List[int],
-        features_extractor: nn.Module,
-        features_dim: int,
+        observation_space: gym.Space,
+        features_dim: int = 512,
+        normalized_image: bool = False,
+    ) -> None:
+        super().__init__(observation_space, features_dim)
+
+        assert is_image_space(
+            observation_space, check_channels=False, normalized_image=normalized_image
+        ), "ComplexCNN should be used with image spaces."
+
+        n_input_channels = observation_space.shape[0]
+
+        # More complex CNN architecture
+        self.cnn = nn.Sequential(
+            nn.Conv2d(n_input_channels, 32, kernel_size=8, stride=4, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm2d(32),
+            nn.Conv2d(32, 64, kernel_size=4, stride=2, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 64, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm2d(64),
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=0),
+            nn.ReLU(),
+            nn.BatchNorm2d(128),
+            nn.Flatten(),
+        )
+
+        # Compute shape by doing one forward pass
+        with th.no_grad():
+            n_flatten = self.cnn(
+                th.as_tensor(observation_space.sample()[None]).float()
+            ).shape[1]
+
+        # Additional fully connected layers
+        self.linear = nn.Sequential(
+            nn.Linear(n_flatten, 1024),
+            nn.ReLU(),
+            nn.Dropout(p=0.5),
+            nn.Linear(1024, features_dim),
+            nn.ReLU(),
+        )
+
+    def forward(self, observations: th.Tensor) -> th.Tensor:
+        return self.linear(self.cnn(observations))
+
+
+class ComplexCombinedExtractor(BaseFeaturesExtractor):
+    """
+    Combined features extractor for Dict observation spaces.
+    Builds a features extractor for each key of the space. Input from each space
+    is fed through a separate submodule (CNN or MLP, depending on input shape),
+    the output features are concatenated and fed through additional MLP network ("combined").
+
+    :param observation_space:
+    :param cnn_output_dim: Number of features to output from each CNN submodule(s). Defaults to
+        256 to avoid exploding network sizes.
+    :param normalized_image: Whether to assume that the image is already normalized
+        or not (this disables dtype and bounds checks): when True, it only checks that
+        the space is a Box and has 3 dimensions.
+        Otherwise, it checks that it has expected dtype (uint8) and bounds (values in [0, 255]).
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Dict,
+        cnn_output_dim: int = 512,
+        normalized_image: bool = False,
+    ) -> None:
+        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
+        super().__init__(observation_space, features_dim=1)
+
+        extractors: Dict[str, nn.Module] = {}
+
+        total_concat_size = 0
+        for key, subspace in observation_space.spaces.items():
+            if is_image_space(subspace, normalized_image=normalized_image):
+                extractors[key] = ComplexCNN(
+                    subspace,
+                    features_dim=cnn_output_dim,
+                    normalized_image=normalized_image,
+                )
+                total_concat_size += cnn_output_dim
+            else:
+                # The observation key is a vector, flatten it if needed
+                extractors[key] = nn.Flatten()
+                total_concat_size += get_flattened_obs_dim(subspace)
+
+        self.extractors = nn.ModuleDict(extractors)
+
+        # Update the features dim manually
+        self._features_dim = total_concat_size
+
+    def forward(self, observations: TensorDict) -> th.Tensor:
+        encoded_tensor_list = []
+
+        for key, extractor in self.extractors.items():
+            encoded_tensor_list.append(extractor(observations[key]))
+        return th.cat(encoded_tensor_list, dim=1)
+
+
+class ComplexCnnPolicy(TD3Policy):
+    """
+    Policy class (with both actor and critic) for TD3.
+
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param lr_schedule: Learning rate schedule (could be constant)
+    :param net_arch: The specification of the policy and value networks.
+    :param activation_fn: Activation function
+    :param features_extractor_class: Features extractor to use.
+    :param features_extractor_kwargs: Keyword arguments
+        to pass to the features extractor.
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param optimizer_class: The optimizer to use,
+        ``th.optim.Adam`` by default
+    :param optimizer_kwargs: Additional keyword arguments,
+        excluding the learning rate, to pass to the optimizer
+    :param n_critics: Number of critic networks to create.
+    :param share_features_extractor: Whether to share or not the features extractor
+        between the actor and the critic (this saves computation time)
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Box,
+        lr_schedule: Schedule,
+        net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
         activation_fn: Type[nn.Module] = nn.ReLU,
+        features_extractor_class: Type[BaseFeaturesExtractor] = ComplexCNN,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
         normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
-        share_features_extractor: bool = True,
+        share_features_extractor: bool = False,
     ):
         super().__init__(
             observation_space,
             action_space,
-            features_extractor=features_extractor,
-            normalize_images=normalize_images,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+            n_critics,
+            share_features_extractor,
         )
 
-        action_dim = get_action_dim(self.action_space)
 
-        self.share_features_extractor = share_features_extractor
-        self.n_critics = n_critics
-        self.q_networks = []
-        for idx in range(n_critics):
-            # q_net = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn)
-            # Define critic with Dropout here
-            q_net = nn.Sequential(...)
-            self.add_module(f"qf{idx}", q_net)
-            self.q_networks.append(q_net)
+class ComplexMultiInputPolicy(TD3Policy):
+    """
+    Policy class (with both actor and critic) for TD3 to be used with Dict observation spaces.
 
-    def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
-        # Learn the features extractor using the policy loss only
-        # when the features_extractor is shared with the actor
-        with th.set_grad_enabled(not self.share_features_extractor):
-            features = self.extract_features(obs)
-        qvalue_input = th.cat([features, actions], dim=1)
-        return tuple(q_net(qvalue_input) for q_net in self.q_networks)
+    :param observation_space: Observation space
+    :param action_space: Action space
+    :param lr_schedule: Learning rate schedule (could be constant)
+    :param net_arch: The specification of the policy and value networks.
+    :param activation_fn: Activation function
+    :param features_extractor_class: Features extractor to use.
+    :param features_extractor_kwargs: Keyword arguments
+        to pass to the features extractor.
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param optimizer_class: The optimizer to use,
+        ``th.optim.Adam`` by default
+    :param optimizer_kwargs: Additional keyword arguments,
+        excluding the learning rate, to pass to the optimizer
+    :param n_critics: Number of critic networks to create.
+    :param share_features_extractor: Whether to share or not the features extractor
+        between the actor and the critic (this saves computation time)
+    """
 
-    def q1_forward(self, obs: th.Tensor, actions: th.Tensor) -> th.Tensor:
-        """
-        Only predict the Q-value using the first network.
-        This allows to reduce computation when all the estimates are not needed
-        (e.g. when updating the policy in TD3).
-        """
-        with th.no_grad():
-            features = self.extract_features(obs)
-        return self.q_networks[0](th.cat([features, actions], dim=1))
-
-
-class CustomTD3Policy(TD3Policy):
-    def __init__(self, *args, **kwargs):
-        super(CustomTD3Policy, self).__init__(*args, **kwargs)
-
-    def make_actor(
-        self, features_extractor: Optional[BaseFeaturesExtractor] = None
-    ) -> CustomActor:
-        actor_kwargs = self._update_features_extractor(
-            self.actor_kwargs, features_extractor
+    def __init__(
+        self,
+        observation_space: spaces.Dict,
+        action_space: spaces.Box,
+        lr_schedule: Schedule,
+        net_arch: Optional[Union[List[int], Dict[str, List[int]]]] = None,
+        activation_fn: Type[nn.Module] = nn.ReLU,
+        features_extractor_class: Type[
+            BaseFeaturesExtractor
+        ] = ComplexCombinedExtractor,
+        features_extractor_kwargs: Optional[Dict[str, Any]] = None,
+        normalize_images: bool = True,
+        optimizer_class: Type[th.optim.Optimizer] = th.optim.Adam,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        n_critics: int = 2,
+        share_features_extractor: bool = False,
+    ):
+        super().__init__(
+            observation_space,
+            action_space,
+            lr_schedule,
+            net_arch,
+            activation_fn,
+            features_extractor_class,
+            features_extractor_kwargs,
+            normalize_images,
+            optimizer_class,
+            optimizer_kwargs,
+            n_critics,
+            share_features_extractor,
         )
-        return CustomActor(**actor_kwargs).to(self.device)
-
-    def make_critic(
-        self, features_extractor: Optional[BaseFeaturesExtractor] = None
-    ) -> CustomContinuousCritic:
-        critic_kwargs = self._update_features_extractor(
-            self.critic_kwargs, features_extractor
-        )
-        return CustomContinuousCritic(**critic_kwargs).to(self.device)
 
 
-# To register a policy, so you can use a string to create the network
-# TD3.policy_aliases["CustomTD3Policy"] = CustomTD3Policy
+env = gym.make("CarRacing-v2", render_mode="human")
+# obs, _ = env.reset()
+# for _ in range(10):
+#     obs, _, _, _, _ = env.step(env.action_space.sample())
+# from PIL import Image
+# # Convert the array to an Image
+# image = Image.fromarray(obs)
+
+# # Save the image
+# image.save('output_image.png')
+
+model = TD3(
+    ComplexCnnPolicy,
+    env,
+    learning_rate=0.0001,
+    buffer_size=100000,
+    learning_starts=1000,
+    verbose=1,
+)
+
+# # Access and print the actor network
+# print("Actor Network Architecture:")
+# print(model.policy.actor.parameters())
+
+# # Access and print the critic network
+# print("\nCritic Network Architecture:")
+# print(model.policy.critic.parameters())
+
+# import torch
+# device = torch.device("cuda")
+# actor = model.policy.actor
+# critic = model.policy.critic
+# obs, _ = env.reset()
+# # Convert to PyTorch tensor and add batch dimension
+# obs = torch.from_numpy(obs).unsqueeze(0)
+
+# # Permute the dimensions to (batch_size, channels, height, width)
+# obs = obs.permute(0, 3, 1, 2)
+# obs = obs.to(device)
+# action = actor(obs)
+# reward = critic(obs, action)
+# print(reward)
+
+print([i for i in model.policy.critic.parameters()])
+
+# model.learn(1000000, progress_bar=True)

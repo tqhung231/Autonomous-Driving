@@ -222,7 +222,7 @@ class CarlaEnvContinuous(gymnasium.Env):
         #     reward -= 1
         #     self.lane_invasion = None
 
-        if self.frame >= 6000:
+        if self.frame >= 3:
             truncated = True
             print("Time out!")
             return obs, reward, terminated, truncated, {}
